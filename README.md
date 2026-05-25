@@ -80,3 +80,22 @@ Paste either:
 Problem links are fetched best-effort through LeetCode's public GraphQL endpoint. If that fails because of network access or LeetCode restrictions, paste the statement directly.
 
 All generated implementation guidance assumes Java.
+
+## API Documentation
+
+See [docs/CALLING_AGENT.md](docs/CALLING_AGENT.md) for:
+
+- web UI usage
+- REST API request and response shapes
+- curl examples
+- JavaScript fetch examples
+- the `complete solution` unlock flow
+- Ollama troubleshooting
+
+## Git History
+
+This project is initialized as a git repository. View the local commit history with:
+
+```bash
+git log --oneline
+```
