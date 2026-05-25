@@ -102,8 +102,20 @@ async function callOllama({ model, systemPrompt, userPrompt, mode }) {
   }
 
   const data = await response.json();
+
+  // Ollama may return 200 with empty content when the model is loading or errored
+  if (data?.error) {
+    throw new Error(`Ollama error: ${data.error}`);
+  }
+
   const content = data?.message?.content;
-  if (!content) throw new Error("Ollama response did not include message content.");
+  if (!content) {
+    const reason = data?.done_reason;
+    const msg = reason
+      ? `Ollama stopped generation (${reason}) without producing content. Try a smaller AI_MAX_OUTPUT_TOKENS or restart Ollama.`
+      : `Ollama returned an empty response. Make sure the model "${model}" is loaded and Ollama is running.`;
+    throw new Error(msg);
+  }
   return content.trim();
 }
 
@@ -162,7 +174,13 @@ async function callOpenAICompatible({ model, systemPrompt, userPrompt, mode }) {
 
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error("Model response did not include message content.");
+  if (!content) {
+    const finish = data?.choices?.[0]?.finish_reason;
+    const msg = finish
+      ? `Model stopped (${finish}) without producing content. Try a smaller max_tokens.`
+      : "Model returned an empty response. Check the provider's logs.";
+    throw new Error(msg);
+  }
   return content.trim();
 }
 
