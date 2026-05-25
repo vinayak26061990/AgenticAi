@@ -1,0 +1,15 @@
+{
+  "name": "leetcode-java-coach-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A local LeetCode coaching agent that gives Java-focused hints, examples, and diagrams before revealing complete solutions.",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "check": "node --check server.js && node --check src/agent.js && node --check src/leetcode.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

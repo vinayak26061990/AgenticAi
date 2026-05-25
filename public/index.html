@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LeetCode Java Coach</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Local agent</p>
+            <h1>LeetCode Java Coach</h1>
+          </div>
+          <div class="status-strip" aria-live="polite">
+            <span id="modelBadge" class="badge neutral">Model: local</span>
+            <span id="lockBadge" class="badge locked">Solution locked</span>
+          </div>
+        </header>
+
+        <div class="main-grid">
+          <section class="panel problem-panel" aria-labelledby="problemTitle">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Problem context</p>
+                <h2 id="problemTitle">Statement or link</h2>
+              </div>
+              <button id="loadSampleBtn" class="ghost-button" type="button">Load sample</button>
+            </div>
+
+            <textarea id="problemInput" spellcheck="false" placeholder="Paste a LeetCode problem statement, or paste a link like https://leetcode.com/problems/two-sum/"></textarea>
+
+            <div class="button-row">
+              <button id="analyzeBtn" class="primary-button" type="button">Analyze problem</button>
+              <button id="clearBtn" class="secondary-button" type="button">Clear</button>
+            </div>
+
+            <dl id="problemMeta" class="meta-grid">
+              <div>
+                <dt>Title</dt>
+                <dd>Not loaded</dd>
+              </div>
+              <div>
+                <dt>Difficulty</dt>
+                <dd>Unknown</dd>
+              </div>
+              <div>
+                <dt>Source</dt>
+                <dd>None</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section class="panel coach-panel" aria-labelledby="coachTitle">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Guidance</p>
+                <h2 id="coachTitle">Hints, examples, diagrams</h2>
+              </div>
+              <div class="tabs" role="tablist" aria-label="Response view">
+                <button class="tab is-active" data-tab="coach" type="button">Coach</button>
+                <button class="tab" data-tab="conversation" type="button">Chat</button>
+              </div>
+            </div>
+
+            <div id="coachView" class="response-view is-active">
+              <article id="responseOutput" class="markdown-output empty-state">
+                Paste a problem and analyze it to start.
+              </article>
+            </div>
+
+            <div id="conversationView" class="response-view">
+              <div id="chatLog" class="chat-log" aria-live="polite"></div>
+            </div>
+
+            <div class="quick-actions" aria-label="Coach actions">
+              <button data-prompt="Give me the next hint without code." type="button">Next hint</button>
+              <button data-prompt="Dry run the main approach on an example with a diagram." type="button">Dry run</button>
+              <button data-prompt="List edge cases I should test in Java." type="button">Edge cases</button>
+              <button data-prompt="Explain the best Java data structures for this problem." type="button">Java tools</button>
+              <button data-prompt="complete solution" type="button">Complete solution</button>
+            </div>
+
+            <form id="chatForm" class="chat-form">
+              <input id="chatInput" type="text" autocomplete="off" placeholder="Ask for a hint, dry run, edge cases, or type complete solution">
+              <button class="primary-button" type="submit">Send</button>
+            </form>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
