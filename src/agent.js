@@ -1,7 +1,8 @@
 const DEFAULT_PROVIDER = "local";
-const DEFAULT_MODEL = "qwen2.5-coder:7b";
+const DEFAULT_MODEL = "qwen3.6-64K:latest";
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
 const DEFAULT_HINT_OUTPUT_TOKENS = 1400;
+const DEFAULT_REVIEW_OUTPUT_TOKENS = 2200;
 const DEFAULT_COMPLETE_OUTPUT_TOKENS = 2600;
 
 export async function buildAgentReply({ problem, messages }) {
@@ -10,49 +11,55 @@ export async function buildAgentReply({ problem, messages }) {
   }
 
   const latestMessage = messages.at(-1)?.content || "";
-  const allowCompleteSolution = /\bcomplete solution\b/i.test(latestMessage);
+  const mode = determineInteractionMode(latestMessage);
+  const allowCompleteSolution = mode === "complete-solution";
+  const reviewProposedSolution = mode === "solution-review";
 
   const provider = (process.env.AI_PROVIDER || DEFAULT_PROVIDER).toLowerCase();
 
   if (provider === "local") {
     return {
-      content: localFallback(problem, latestMessage, allowCompleteSolution),
+      content: localFallback(problem, latestMessage, mode),
       model: "local-fallback",
       allowCompleteSolution,
-      solutionLocked: !allowCompleteSolution
+      solutionLocked: !allowCompleteSolution,
+      reviewProposedSolution,
+      mode
     };
   }
 
-  const response = await callConfiguredModel(problem, messages, allowCompleteSolution, provider);
-  const guarded = guardSolutionLeak(response, allowCompleteSolution);
+  const response = await callConfiguredModel(problem, messages, mode, provider);
+  const guarded = guardSolutionLeak(response, mode);
 
   return {
     content: guarded,
     model: `${provider}:${process.env.AI_MODEL || DEFAULT_MODEL}`,
     allowCompleteSolution,
-    solutionLocked: !allowCompleteSolution
+    solutionLocked: !allowCompleteSolution,
+    reviewProposedSolution,
+    mode
   };
 }
 
-async function callConfiguredModel(problem, messages, allowCompleteSolution, provider) {
+async function callConfiguredModel(problem, messages, mode, provider) {
   const model = process.env.AI_MODEL || DEFAULT_MODEL;
-  const userMessages = formatConversation(messages, allowCompleteSolution);
+  const userMessages = formatConversation(messages, mode);
 
-  const systemPrompt = buildSystemPrompt(allowCompleteSolution);
-  const userPrompt = buildUserPrompt(problem, userMessages, allowCompleteSolution);
+  const systemPrompt = buildSystemPrompt(mode);
+  const userPrompt = buildUserPrompt(problem, userMessages, mode);
 
   if (provider === "ollama") {
-    return callOllama({ model, systemPrompt, userPrompt, allowCompleteSolution });
+    return callOllama({ model, systemPrompt, userPrompt, mode });
   }
 
   if (provider === "openai-compatible") {
-    return callOpenAICompatible({ model, systemPrompt, userPrompt, allowCompleteSolution });
+    return callOpenAICompatible({ model, systemPrompt, userPrompt, mode });
   }
 
   throw new Error(`Unknown AI_PROVIDER "${provider}". Use local, ollama, or openai-compatible.`);
 }
 
-async function callOllama({ model, systemPrompt, userPrompt, allowCompleteSolution }) {
+async function callOllama({ model, systemPrompt, userPrompt, mode }) {
   const baseUrl = (process.env.AI_BASE_URL || "http://localhost:11434").replace(/\/$/, "");
   const timeoutMs = optionalInteger(process.env.AI_REQUEST_TIMEOUT_MS) || DEFAULT_REQUEST_TIMEOUT_MS;
   const controller = new AbortController();
@@ -72,7 +79,7 @@ async function callOllama({ model, systemPrompt, userPrompt, allowCompleteSoluti
         options: {
           temperature: 0.2,
           num_ctx: optionalInteger(process.env.AI_CONTEXT_TOKENS),
-          num_predict: outputTokenLimit(allowCompleteSolution)
+          num_predict: outputTokenLimit(mode)
         },
         messages: [
           { role: "system", content: systemPrompt },
@@ -105,7 +112,7 @@ function optionalInteger(value) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-async function callOpenAICompatible({ model, systemPrompt, userPrompt, allowCompleteSolution }) {
+async function callOpenAICompatible({ model, systemPrompt, userPrompt, mode }) {
   const baseUrl = (process.env.AI_BASE_URL || "").replace(/\/$/, "");
   if (!baseUrl) {
     throw new Error("AI_BASE_URL is required for openai-compatible provider.");
@@ -132,7 +139,7 @@ async function callOpenAICompatible({ model, systemPrompt, userPrompt, allowComp
       body: JSON.stringify({
         model,
         temperature: 0.2,
-        max_tokens: outputTokenLimit(allowCompleteSolution),
+        max_tokens: outputTokenLimit(mode),
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt }
@@ -159,7 +166,38 @@ async function callOpenAICompatible({ model, systemPrompt, userPrompt, allowComp
   return content.trim();
 }
 
-function buildSystemPrompt(allowCompleteSolution) {
+function determineInteractionMode(latestMessage) {
+  if (/\bcomplete solution\b/i.test(latestMessage)) return "complete-solution";
+  if (hasProposedSolution(latestMessage)) return "solution-review";
+  return "coaching";
+}
+
+function hasProposedSolution(text) {
+  const value = String(text || "").trim();
+  if (!value) return false;
+
+  const asksForReview = /\b(?:review|evaluate|check|debug|validate|test|critique|syntax|edge cases?|failing?|fails?|wrong answer|my solution|this solution|probable solution)\b/i.test(value);
+  const hasCodeFence = /```(?:java)?[\s\S]{40,}```/i.test(value);
+  const hasSolutionClass = /\bclass\s+Solution\b[\s\S]{40,}/i.test(value);
+  const hasMethodBody = /\b(?:public|private|protected)?\s*(?:static\s+)?(?:int|boolean|long|double|char|void|String|List<[^>]+>|Map<[^>]+>|Set<[^>]+>|int\[\]|char\[\]|boolean\[\]|String\[\])\s+\w+\s*\([^)]*\)\s*\{/i.test(value);
+
+  if (hasCodeFence || hasSolutionClass || (asksForReview && hasMethodBody)) return true;
+
+  const codeSignals = [
+    /\bfor\s*\(/,
+    /\bwhile\s*\(/,
+    /\bif\s*\(/,
+    /\breturn\b/,
+    /;\s*(?:\n|$)/,
+    /\{[\s\S]*\}/,
+    /\b(?:HashMap|HashSet|ArrayList|ArrayDeque|PriorityQueue|Arrays|Collections)\b/
+  ].filter(regex => regex.test(value)).length;
+
+  return asksForReview && value.length > 120 && codeSignals >= 3;
+}
+
+function buildSystemPrompt(mode) {
+  const allowCompleteSolution = mode === "complete-solution";
   return `
 You are a LeetCode coaching agent for Java implementations.
 
@@ -169,21 +207,26 @@ Core behavior:
 - Give guidelines, mental models, hints, edge cases, and dry-run examples.
 - Include compact ASCII diagrams when they help explain pointers, stacks, queues, trees, graphs, matrices, or DP tables.
 - Prefer progressive disclosure: start with pattern recognition, brute force, optimized approach, invariants, and pitfalls.
+- If the user provides a probable Java solution or asks you to review, evaluate, check, debug, or validate their solution, switch to solution-review behavior.
+- In solution-review behavior, inspect the user's submitted code for Java syntax or compile risks, LeetCode signature mismatch, algorithmic correctness, edge cases, complexity, and likely failing tests. Give actionable feedback tied to their code.
+- In solution-review behavior, you may quote small snippets or corrected lines, but do not provide a complete replacement implementation unless the latest user message contains the exact keyword phrase "complete solution".
 - Do not provide a complete Java implementation unless the latest user message contains the exact keyword phrase "complete solution".
 - Before that keyword appears, do not output a full class Solution, full method body, or final accepted code. Small Java-flavored snippets are allowed only when they are not enough to submit.
 - If the keyword is present, provide the full final answer with complete Java code. Do not use placeholders. Use the method signature implied by the problem.
 
+Current mode: ${mode}.
 Current lock state: ${allowCompleteSolution ? "complete solution allowed" : "complete solution locked"}.
 `.trim();
 }
 
-function buildUserPrompt(problem, userMessages, allowCompleteSolution) {
+function buildUserPrompt(problem, userMessages, mode) {
   return `
 Problem metadata:
 Title: ${problem.title || "Unknown"}
 Difficulty: ${problem.difficulty || "Unknown"}
 Topics detected: ${(problem.topics || []).join(", ") || "Unknown"}
 Source: ${problem.source || "pasted"}
+Interaction mode: ${mode}
 
 Problem statement:
 ${problem.statement}
@@ -197,8 +240,14 @@ ${(problem.constraints || []).map(item => `- ${item}`).join("\n") || "None extra
 Conversation:
 ${userMessages}
 
-${allowCompleteSolution ? completeSolutionInstructions() : lockedCoachingInstructions()}
+${instructionsForMode(mode)}
 `.trim();
+}
+
+function instructionsForMode(mode) {
+  if (mode === "complete-solution") return completeSolutionInstructions();
+  if (mode === "solution-review") return solutionReviewInstructions();
+  return lockedCoachingInstructions();
 }
 
 function lockedCoachingInstructions() {
@@ -212,6 +261,22 @@ Respond now. Complete solution is locked, so give coaching only:
 6. Examples, including edge cases to watch.
 7. ASCII diagram or table.
 8. What the learner should implement next.
+
+If the learner wants feedback on their own attempt, tell them they can paste their Java solution and ask for a review.
+`.trim();
+}
+
+function solutionReviewInstructions() {
+  return `
+Respond now in solution-review mode. The user has provided or referred to their own probable Java solution.
+Keep the complete-solution lock active and do not provide a full replacement implementation.
+Include these sections:
+1. Verdict: whether the attempt is likely accepted, likely compile error, likely wrong answer, or needs more information.
+2. Syntax and LeetCode signature check: Java compile risks, missing return paths, bad method/class shape, imports only if relevant, and type issues.
+3. Correctness review: explain the core invariant in the user's approach and where it breaks, if it breaks.
+4. Edge cases that may fail: include concrete inputs when possible and the expected behavior.
+5. Complexity: time and space implied by the submitted code.
+6. Targeted fixes: small changes or pseudocode-level guidance, not a full corrected solution unless the user explicitly asks for "complete solution".
 `.trim();
 }
 
@@ -231,10 +296,10 @@ Keep the answer complete but focused. Prefer the optimal Java implementation for
 `.trim();
 }
 
-function formatConversation(messages, allowCompleteSolution) {
+function formatConversation(messages, mode) {
   if (!messages.length) return "USER: Start coaching me on this problem.";
 
-  if (allowCompleteSolution) {
+  if (mode === "complete-solution") {
     const recentUserMessages = messages
       .filter(message => message.role === "user")
       .slice(-3)
@@ -246,15 +311,30 @@ function formatConversation(messages, allowCompleteSolution) {
     ].join("\n\n");
   }
 
+  if (mode === "solution-review") {
+    const recentMessages = messages.slice(-4);
+    return recentMessages
+      .map((message, index) => {
+        const isLatest = index === recentMessages.length - 1;
+        const maxLength = isLatest ? 8000 : (message.role === "assistant" ? 900 : 1600);
+        return `${message.role.toUpperCase()}: ${truncate(message.content, maxLength)}`;
+      })
+      .join("\n\n");
+  }
+
   return messages
     .slice(-6)
     .map(message => `${message.role.toUpperCase()}: ${truncate(message.content, message.role === "assistant" ? 900 : 1400)}`)
     .join("\n\n");
 }
 
-function outputTokenLimit(allowCompleteSolution) {
+function outputTokenLimit(mode) {
   return optionalInteger(process.env.AI_MAX_OUTPUT_TOKENS) ||
-    (allowCompleteSolution ? DEFAULT_COMPLETE_OUTPUT_TOKENS : DEFAULT_HINT_OUTPUT_TOKENS);
+    (mode === "complete-solution"
+      ? DEFAULT_COMPLETE_OUTPUT_TOKENS
+      : mode === "solution-review"
+        ? DEFAULT_REVIEW_OUTPUT_TOKENS
+        : DEFAULT_HINT_OUTPUT_TOKENS);
 }
 
 function truncate(text, maxLength) {
@@ -262,8 +342,8 @@ function truncate(text, maxLength) {
   return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
 }
 
-function guardSolutionLeak(text, allowCompleteSolution) {
-  if (allowCompleteSolution) return text;
+function guardSolutionLeak(text, mode) {
+  if (mode === "complete-solution" || mode === "solution-review") return text;
 
   const hasFullSolution =
     /class\s+Solution\b/.test(text) ||
@@ -282,8 +362,8 @@ function guardSolutionLeak(text, allowCompleteSolution) {
   ].join("\n");
 }
 
-function localFallback(problem, latestMessage, allowCompleteSolution) {
-  if (allowCompleteSolution) {
+function localFallback(problem, latestMessage, mode) {
+  if (mode === "complete-solution") {
     return [
       `## ${problem.title}`,
       "",
@@ -298,8 +378,12 @@ function localFallback(problem, latestMessage, allowCompleteSolution) {
       "}",
       "```",
       "",
-      localFallback(problem, latestMessage, false)
+      localFallback(problem, latestMessage, "coaching")
     ].join("\n");
+  }
+
+  if (mode === "solution-review") {
+    return localSolutionReview(problem, latestMessage);
   }
 
   const profile = detectApproachProfile(problem);
@@ -342,6 +426,262 @@ function localFallback(problem, latestMessage, allowCompleteSolution) {
     "### Next Step",
     "Write the Java method signature from LeetCode, name the invariant in a comment, then implement only the first pass or first recurrence. Ask for another hint when you get stuck."
   ].join("\n");
+}
+
+function localSolutionReview(problem, latestMessage) {
+  const code = extractCandidateSolution(latestMessage);
+  const profile = detectApproachProfile(problem);
+  const syntaxFindings = analyzeJavaSyntaxShape(code);
+  const fitFindings = analyzeProblemFit(problem, code);
+  const complexityFindings = inferComplexitySignals(code);
+
+  return [
+    `## ${problem.title} Solution Review`,
+    "",
+    "Local static review mode is active. This catches common Java and LeetCode failure patterns, but a configured model provider can give a deeper line-by-line proof of correctness.",
+    "",
+    "### Verdict",
+    syntaxFindings.some(item => item.severity === "error")
+      ? "Likely compile or submission-shape issue until the syntax findings below are fixed."
+      : "No obvious syntax-shape blocker was found by the local checker. The main risk is correctness on edge cases, so dry-run the tests below.",
+    "",
+    "### Syntax And Signature Check",
+    ...syntaxFindings.map(item => `- ${item.message}`),
+    "",
+    "### Problem Fit",
+    ...(fitFindings.length ? fitFindings.map(item => `- ${item}`) : ["- No problem-specific mismatch was obvious from static checks. Verify the invariant with the official examples."]),
+    "",
+    "### Complexity Signals",
+    ...complexityFindings.map(item => `- ${item}`),
+    "",
+    "### Edge Cases To Try",
+    ...profile.edgeCases.map(item => `- ${item}`),
+    "",
+    "### Next Step",
+    "Run the official examples, then add one test for each edge case above. If any fail, paste the failing input/output and the current code for a tighter review."
+  ].join("\n");
+}
+
+function extractCandidateSolution(message) {
+  const text = String(message || "").trim();
+  const fenced = text.match(/```(?:java)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]?.trim()) return fenced[1].trim();
+
+  const classStart = text.match(/\bclass\s+Solution\b[\s\S]*/i);
+  if (classStart?.[0]?.trim()) return classStart[0].trim();
+
+  const methodStart = text.match(/\b(?:public|private|protected)?\s*(?:static\s+)?(?:int|boolean|long|double|char|void|String|List<[^>]+>|Map<[^>]+>|Set<[^>]+>|int\[\]|char\[\]|boolean\[\]|String\[\])\s+\w+\s*\([^)]*\)\s*\{[\s\S]*/i);
+  if (methodStart?.[0]?.trim()) return methodStart[0].trim();
+
+  return text;
+}
+
+function analyzeJavaSyntaxShape(code) {
+  const findings = [];
+  const source = String(code || "").trim();
+
+  if (source.length < 40) {
+    findings.push({
+      severity: "error",
+      message: "I do not see enough Java code to evaluate. Paste the method or `class Solution` in the chat."
+    });
+    return findings;
+  }
+
+  const clean = stripJavaCommentsAndLiterals(source);
+  const bracketIssue = findBracketIssue(clean);
+  if (bracketIssue) {
+    findings.push({ severity: "error", message: bracketIssue });
+  }
+
+  if (!/\bclass\s+Solution\b/.test(clean)) {
+    findings.push({
+      severity: "warn",
+      message: "No `class Solution` wrapper was detected. A pasted method is fine for review, but the final LeetCode submission must live inside `class Solution`."
+    });
+  }
+
+  if (!/\b(?:public|private|protected)?\s*(?:static\s+)?(?:int|boolean|long|double|char|void|String|List<[^>]+>|Map<[^>]+>|Set<[^>]+>|int\[\]|char\[\]|boolean\[\]|String\[\])\s+\w+\s*\([^)]*\)\s*\{/.test(clean)) {
+    findings.push({
+      severity: "error",
+      message: "No complete Java method signature with a body was detected."
+    });
+  }
+
+  const primitiveReturn = clean.match(/\b(?:public|private|protected)?\s*(?:static\s+)?(int|boolean|long|double|char)\s+\w+\s*\([^)]*\)\s*\{/);
+  if (primitiveReturn && /\breturn\s+null\s*;/.test(clean)) {
+    findings.push({
+      severity: "error",
+      message: `A method returning primitive \`${primitiveReturn[1]}\` cannot return \`null\`.`
+    });
+  }
+
+  if (/\b(?:nums|arr|array|grid|matrix|heights|prices|values|intervals)\.length\(\)/.test(clean)) {
+    findings.push({
+      severity: "error",
+      message: "Arrays use `.length`, not `.length()`. Strings use `.length()`."
+    });
+  }
+
+  if (/\bif\s*\([^)]*[^!<>=]=[^=][^)]*\)/.test(clean)) {
+    findings.push({
+      severity: "error",
+      message: "An `if` condition appears to use assignment `=`. Java conditions usually need `==`, `<`, `>`, or a boolean expression."
+    });
+  }
+
+  const mapNames = extractMapVariableNames(clean);
+  for (const name of mapNames) {
+    const containsRegex = new RegExp(`\\b${escapeRegex(name)}\\.contains\\s*\\(`);
+    if (containsRegex.test(clean)) {
+      findings.push({
+        severity: "error",
+        message: `\`${name}.contains(...)\` is not a ` +
+          "Map method. Use `containsKey(...)` or `containsValue(...)`."
+      });
+    }
+  }
+
+  if (/\bString\b[\s\S]*==/.test(clean)) {
+    findings.push({
+      severity: "warn",
+      message: "If you compare String values, use `.equals(...)`; `==` compares references."
+    });
+  }
+
+  if (/return\s+[a-zA-Z_]\w*\s*-\s*[a-zA-Z_]\w*\s*;/.test(clean) || /->\s*[a-zA-Z_]\w*(?:\[[^\]]+\])?\s*-\s*[a-zA-Z_]\w*/.test(clean)) {
+    findings.push({
+      severity: "warn",
+      message: "Comparator subtraction can overflow. Prefer `Integer.compare(a, b)` or `Long.compare(a, b)`."
+    });
+  }
+
+  if (/\b(?:left|lo|low)\s*\+\s*(?:right|hi|high)\s*\/\s*2\b/.test(clean) || /\(\s*(?:left|lo|low)\s*\+\s*(?:right|hi|high)\s*\)\s*\/\s*2\b/.test(clean)) {
+    findings.push({
+      severity: "warn",
+      message: "For binary search, compute mid as `left + (right - left) / 2` to avoid overflow."
+    });
+  }
+
+  if (findings.length === 0) {
+    findings.push({
+      severity: "info",
+      message: "No obvious syntax-shape issue was found by the local static checker."
+    });
+  }
+
+  return findings;
+}
+
+function stripJavaCommentsAndLiterals(code) {
+  return String(code || "")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/\/\/.*$/gm, " ")
+    .replace(/"(?:\\.|[^"\\])*"/g, "\"\"")
+    .replace(/'(?:\\.|[^'\\])+'/g, "''");
+}
+
+function findBracketIssue(code) {
+  const pairs = {
+    "(": ")",
+    "{": "}",
+    "[": "]"
+  };
+  const opening = new Set(Object.keys(pairs));
+  const closing = new Map(Object.entries(pairs).map(([open, close]) => [close, open]));
+  const stack = [];
+
+  for (const char of code) {
+    if (opening.has(char)) {
+      stack.push(char);
+      continue;
+    }
+
+    if (!closing.has(char)) continue;
+
+    const expectedOpen = closing.get(char);
+    const actualOpen = stack.pop();
+    if (actualOpen !== expectedOpen) {
+      return `Bracket mismatch near \`${char}\`: expected it to close \`${pairs[actualOpen] || "nothing"}\`.`;
+    }
+  }
+
+  if (stack.length) {
+    const lastOpen = stack.at(-1);
+    return `Unclosed bracket \`${lastOpen}\`; expected a matching \`${pairs[lastOpen]}\`.`;
+  }
+
+  return null;
+}
+
+function extractMapVariableNames(code) {
+  const names = new Set();
+  const patterns = [
+    /\b(?:HashMap|Map)<[^>]+>\s+([a-zA-Z_]\w*)\b/g,
+    /\b(?:HashMap|Map)\s+([a-zA-Z_]\w*)\s*=/g
+  ];
+
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(code))) {
+      names.add(match[1]);
+    }
+  }
+
+  return [...names];
+}
+
+function analyzeProblemFit(problem, code) {
+  const findings = [];
+  const statement = `${problem.title || ""}\n${problem.statement || ""}`.toLowerCase();
+  const clean = stripJavaCommentsAndLiterals(code);
+
+  if (/return\s+indices|return indices|index|indices/.test(statement) && /\bArrays\.sort\s*\(/.test(clean)) {
+    findings.push("The problem appears to require original indices, and `Arrays.sort(...)` can destroy index positions unless you store index-value pairs first.");
+  }
+
+  if (/same element twice|may not use the same element twice/.test(statement) && /\bmap\.put\s*\([^;]+;\s*if\s*\([^)]*containsKey/i.test(clean)) {
+    findings.push("For complement-map problems, checking after inserting the current element can accidentally reuse the same index. Check first, then insert the current value.");
+  }
+
+  if (/(?:-\d|\bnegative\b|nums\[i\]\s*<=\s*10\^9|\b10\^9\b)/i.test(statement) && /\b[a-zA-Z_]\w*\s*\[\s*nums\s*\[[^\]]+\]\s*\]/.test(clean)) {
+    findings.push("Directly using `nums[i]` as an array index can fail for negative or very large values. Prefer a `HashMap` unless the value range is small and non-negative.");
+  }
+
+  if (/\bempty\b|0\s*<=|length\s*==\s*0/.test(statement) && !/\b(?:length|size)\s*==\s*0|\b(?:length|size)\s*<\s*1|\bisEmpty\s*\(/.test(clean)) {
+    findings.push("The statement may allow empty input. Add an explicit empty-case check if the LeetCode signature allows it.");
+  }
+
+  return findings;
+}
+
+function inferComplexitySignals(code) {
+  const clean = stripJavaCommentsAndLiterals(code);
+  const findings = [];
+
+  if (/\bfor\s*\([^)]*\)\s*\{[\s\S]*\bfor\s*\(/.test(clean) || /\bwhile\s*\([^)]*\)\s*\{[\s\S]*\bwhile\s*\(/.test(clean)) {
+    findings.push("Nested loops suggest O(n^2) or worse. Compare that against the largest constraint.");
+  } else if (/\b(?:for|while)\s*\(/.test(clean) && /\b(?:HashMap|HashSet|Map|Set)\b/.test(clean)) {
+    findings.push("A single pass with hash-based state is usually O(n) average time and O(n) space.");
+  } else if (/\b(?:for|while)\s*\(/.test(clean)) {
+    findings.push("The visible loop structure looks roughly linear unless helpers perform extra scans.");
+  } else {
+    findings.push("No loop was obvious; verify recursion/helper calls to estimate time complexity.");
+  }
+
+  if (/\bArrays\.sort\s*\(|\bCollections\.sort\s*\(/.test(clean)) {
+    findings.push("Sorting adds O(n log n) time and may mutate the input array/list.");
+  }
+
+  if (/\b(?:dfs|recur|helper)\s*\(|\breturn\s+\w+\s*\([^)]*\)/i.test(clean)) {
+    findings.push("Recursive solutions also use call-stack space proportional to recursion depth.");
+  }
+
+  return findings;
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function detectApproachProfile(problem) {
